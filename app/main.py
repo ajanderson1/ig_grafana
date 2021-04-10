@@ -1,10 +1,22 @@
 import json
+from configparser import ConfigParser
 import os
 import time
 import sys
 import getopt
 import yfinance as yf
 from influxdb import InfluxDBClient
+import pprint as pp
+import logging
+from requests import request, get
+import requests
+import pandas as pd
+import numpy
+import pprint as pp
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger()
+log.info("INFO log displaying")  # log test
 
 
 class SuiviBourse:
@@ -28,8 +40,8 @@ class SuiviBourse:
 
         self.appScrapingInterval = int(
             os.getenv('APP_SCRAPING_INTERVAL', default=60))
-        self.appDataFilePath = os.getenv(
-            'APP_FILE_PATH', default='/data/data.json')
+        self.configFilePath = os.getenv(
+            'APP_FILE_PATH', default='/home/pi/GitHub/suivi-bourse-app/config.conf')
 
         for opt, arg in opts:
             if opt in ("-h", "--help"):
@@ -48,61 +60,106 @@ class SuiviBourse:
             elif opt in ("-i", "--interval"):
                 self.appScrapingInterval = int(arg)
             elif opt in ("-c", "--config"):
-                self.appDataFilePath = arg
+                self.configFilePath = arg
 
         self.influxdbClient = InfluxDBClient(
             host=influxHost, port=influxPort, database=influxDatabase,
             username=influxUsername, password=influxPassword)
 
+        if os.path.isfile(self.configFilePath):
+            self.config = ConfigParser()
+            self.config.read(self.configFilePath)
+            print(self.config.sections())
+        else:
+            print("Config file not found")
+
+        self.IG_X_API_KEY = self.config["Auth"]["IG_X_API_KEY"]
+        self.IG_X_SECURITY_TOKEN = self.config["Auth"]["IG_X_SECURITY_TOKEN"]
+        self.IG_CST = self.config["Auth"]["IG_CST"]
+
+        print('This is the API KEY!:', self.IG_X_API_KEY)
+
     def check(self):
         self.influxdbClient.ping()
-        if(not os.path.exists(self.appDataFilePath)):
+        if(not os.path.exists(self.configFilePath)):
             raise Exception(
-                "File {} doesn't exist !".format(self.appDataFilePath))
+                "File {} doesn't exist !".format(self.configFilePath))
 
     def run(self):
-        with open(self.appDataFilePath) as data_file:
-            data = json.load(data_file)
-            for share in data:
-                ticker = yf.Ticker(share['symbol'])
-                history = ticker.history()
-                last_quote = (history.tail(1)['Close'].iloc[0])
-                json_body = [
-                    {
-                        "measurement": "price",
-                        "tags": {
-                            "name": share['name']
-                        },
-                        "fields": {
-                            "amount": float(last_quote)
-                        }
+        pass
+        # with open(self.appDataFilePath) as data_file:
+        #    data = json.load(data_file)
+        # share is taking each item in the json - so in my case each item is 'account' which is already the info i need there.
+        # dont need the complex data exprapolation below     //     last_quote = (history.tail(1)['Close'].iloc[0])
+        self.influxdbClient.write_points(self.get_account_info(
+            IG_X_API_KEY=self.IG_X_API_KEY, IG_X_SECURITY_TOKEN=self.IG_X_SECURITY_TOKEN, IG_CST=self.IG_CST))
+        self.influxdbClient.close()
+
+    def get_account_info(self, IG_X_API_KEY=None, IG_X_SECURITY_TOKEN=None, IG_CST=None, account_info_url="https://demo-api.ig.com/gateway/deal/accounts", HEADER_CONTENT_TYPE="application/json; charset=UTF-8", HEADER_CONTENT_ACCEPT="application/json; charset=UTF-8", IG_VERSION="1"):
+        account_headers = {
+            'Content-Type': HEADER_CONTENT_TYPE,
+            'Accept': HEADER_CONTENT_ACCEPT,
+            'X-IG-API-KEY': IG_X_API_KEY,
+            'version': IG_VERSION,
+            'X-SECURITY-TOKEN': IG_X_SECURITY_TOKEN,
+            'CST': IG_CST
+        }
+
+        r = requests.get(account_info_url, headers=account_headers)
+        d = r.json()  # makes request into JSON (dict)
+        # to prove oringal JSON is correct and nicely formatted
+        print('original JSON below:\n', json.dumps(
+            d, indent=4, sort_keys=True))
+
+        # flattens the JSON (dict): d (dataframe) - now too flat??? not two separate things hmmmmm
+        d_normalised = pd.json_normalize(d['accounts'])
+        # makes into a JSON (dict) ready to use
+        d_normalised_dict = d_normalised.to_dict('records')
+
+        #  d_normalised_json = d_normalised.to_json(orient='records')[1:-1].replace('},{', '} {')   # this line put all the escape chars in but i think would still work (using to_dict instead)
+
+        whichAccount = 'Demo-SpreadBet'
+        # margin = d_normalised.loc[snapshot['accountName'] == whichAccount]['balance.deposit']
+        # profit_loss = d_normalised.iloc[0]['balance.profitLoss']
+        # balance = d_normalised.iloc[0]['balance.balance']
+
+        # preparing just the account im interested in (whichAcccout) ready to prepare in influxDB JSON
+        single_account_info = d_normalised.loc[d_normalised['accountName']
+                                               == whichAccount]
+        single_account_info_dict = single_account_info.to_dict(
+            'records')  # makes into a JSON (dict) ready to use
+        single_account_info_json = single_account_info.to_json(
+            orient='records')[1:-1].replace('},{', '} {')
+
+        final_data = single_account_info_dict
+        # to show the new format ready to iterate through
+        print('new JSON below:\n', json.dumps(
+            final_data, indent=4, sort_keys=True))
+
+        for share in final_data:
+            json_body = [
+                {
+                    "measurement": "account_information",
+                    "tags": {
+                        "accountAlias": "",  # share['accountAlias'],
+                        "accountId": share['accountId'],
+                        "accountName": share['accountName'],
+                        "accountType": share['accountType'],
+                        "canTransferFrom": share['canTransferFrom'],
+                        "canTransferTo": share['canTransferTo'],
+                        "currency": share['currency'],
+                        "preferred": share['preferred'],
+                        "status": share['status']
                     },
-                    {
-                        "measurement": "estate",
-                        "tags": {
-                            "name": share['name'],
-                        },
-                        "fields": {
-                            "quantity": share['estate']['quantity'],
-                            "received_dividend":
-                                float(share['estate']['received_dividend']),
-                        }
-                    },
-                    {
-                        "measurement": "purchase",
-                        "tags": {
-                            "name": share['name'],
-                        },
-                        "fields": {
-                            "quantity": share['purchase']['quantity'],
-                            "cost_price":
-                                float(share['purchase']['cost_price']),
-                            "fee": float(share['purchase']['fee'])
-                        }
+                    "fields": {
+                        "balance_available": share['balance.available'],
+                        "balance_balance": share['balance.balance'],
+                        "balance_deposit": share['balance.deposit'],
+                        "balance_profitLoss": share['balance.profitLoss']
                     }
-                ]
-                self.influxdbClient.write_points(json_body)
-                self.influxdbClient.close()
+                }
+            ]
+        return json_body
 
 
 def usage():
@@ -121,16 +178,16 @@ def usage():
 if __name__ == "__main__":
     error_counter = 0
     suivi = SuiviBourse(sys.argv[1:])
-    while True:
-        try:
-            suivi.check()
-            suivi.run()
-            error_counter = 0
-        except Exception as err:
-            print("An error has occured: " + str(err))
-            error_counter += 1
-            if error_counter >= 5:
-                print("5 consecutive errors : Exiting the app")
-                sys.exit(1)
-        finally:
-            time.sleep(suivi.appScrapingInterval)
+    # while True:  # commen this to hjust run once!
+    try:
+        suivi.check()
+        suivi.run()
+        error_counter = 0
+    except Exception as err:
+        print("An error has occured: " + str(err))
+        error_counter += 1
+        if error_counter >= 5:
+            print("5 consecutive errors : Exiting the app")
+            sys.exit(1)
+    finally:
+        time.sleep(suivi.appScrapingInterval)
