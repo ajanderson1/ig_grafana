@@ -11,5 +11,18 @@
       "quantity": 2,
       "received_dividend": 2.85
     }
+  },
+  {
+    "name": "Microsoft",
+    "symbol": "MSFT",
+    "purchase": {
+      "quantity": 2,
+      "fee": 2,
+      "cost_price": 100
+    },
+    "estate": {
+      "quantity": 2,
+      "received_dividend": 4
+    }
   }
 ]
